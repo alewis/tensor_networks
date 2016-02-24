@@ -21,7 +21,8 @@ class SpinWaveTEBD:
                  which is the default argument.
 
        After construction the simulation is performed using method 'evolve'.
-       Evolve takes a single argument T: the time value to advance to.
+       Evolve takes two arguments: the timestep T to be advanced to, and the
+       link l whose eigenvalues are to be returned.
 
        Method 'printnetwork' outputs detailed information about the current
        state of the spin chain.
@@ -43,25 +44,37 @@ class SpinWaveTEBD:
         else:
             raise NotImplementedError("Only identity currently supported.")
 
-    def evolve(self, T):
-        while (self.thist < T):
+    def evolve(self, T, l):
+        output = []
+        times = []
+        while (self.thist + self.delta) < T:
             self.__advance()
-            print "Step: " + str(self.n) + ", Time: " + str(self.thist) + "\n"
+            outevs = list(self.network.evs(l))
+            output.append([self.thist,] + outevs)
+            # times.append(self.thist)
+            # output.append(outevs)
+
+            outstr = "Step: " + str(self.step) + ", Time: " + str(self.thist)
+            outstr += "/" + str(T) 
+            print outstr
+        #tarr = np.array(times)
+        outarr = np.array(output)
         print "Evolution finished!"
+        return outarr
 
     def __advance(self):
         """Advance the simulation one timestep. 
         """
         ridx = self.n-1
         for l in range(0, ridx):
-            op_single = self.ops.single[l]
-            op_double = self.ops.double[l]
-            self.network.transform(l, op_single, op_double)
-        op_single = self.ops.single[ridx]
-        self.network.transform(l, op_single)
+            sOp = self.ops.sGet(l)
+            dOp = self.ops.dGet(l)
+            self.network.transform(l, sOp, dOp)
+        sOp = self.ops.sGet(ridx)
+        self.network.transform(l, sOp)
         
-        self.thist += delta
-        ++self.step
+        self.thist += self.delta
+        self.step += 1
 
     
     def printnetwork(self):
@@ -91,7 +104,12 @@ class TensorNetwork:
             if not (0 <= ket <= hdim):
                 raise ValueError("Invalid chain for hdim = " + str(hdim))
             self.coefs.append(self.__makecoef(ket, l, self.n))
-      
+     
+    def evs(self, l):
+        """Return the eigenvalues p_a = |lam^l_a|^2 for the l'th link
+        """
+        return np.square(np.absolute(self.coefs[l].lam))
+
     def __makecoef(self, ket, l, n):
         """Generate the l'th coefficient (gamma and lambda) in the initial
            chain. The first, last, and middle values differ qualitatively,
@@ -146,6 +164,22 @@ class TensorNetwork:
         idx = (lam_bra_idx, lam_idx, theta_idx, theta_star_idx)
         return scon(inputs, idx)
 
+    def __single_transform(self, l, U):
+        coef = self.coefs[l]
+        atup = (U, coef.gamma)
+        U_idx = [-1, 1]
+        if (0==l):
+            G_idx = [1, -2]
+        else:
+            G_idx = [1, -2, -3]
+        idx = (U_idx, G_idx)
+        newgamma = scon(atup, idx)
+        self.coefs[l].setgamma(newgamma) 
+
+    def __double_transform(self, l, V):
+        theta = self.__theta_ij(V, self.coefs[l], self.coefs[l+1])
+        Jevs = self.__rho_evs(theta, self.coefs[l-1].lam)    
+
     def transform(self, l, single, double=None):
         """Apply an operator to the l'th and, optionally,
            the l+1th link. The former transform is performed with the operator
@@ -157,25 +191,12 @@ class TensorNetwork:
             raise IndexError("l out of bounds.")
 
         if l == (self.n-1):
-            __single_transform(l, single)
+            self.__single_transform(l, single)
         else:
             if double is not None:
-                __double_transform(l, double) 
-
-            __single_transform(l, single)
+                self.__double_transform(l, double) 
+            self.__single_transform(l, single)
     
-    def __single_transform(self, l, U):
-        coef = self.coefs[l]
-        atup = (U, coef.gamma)
-        U_idx = [-1, 1]
-        G_idx = [1, 2, 3]
-        newgamma = scon(atup, (U_idx, G_idx))
-        self.coefs[l].setgamma(newgamma) 
-
-
-    def __double_transform(self, V, l):
-        theta = self.__theta_ij(V, self.coefs[l], self.coefs[l+1])
-        Jevs = self.__rho_evs(theta, self.coefs[l-1].lam)    
 
 ###############################################################################
 #SpinChainOperators - operators representing the time-evolution of the spin
@@ -186,13 +207,14 @@ class SpinChainOperators:
        l'th link. Method 'double' returns the operator acting on the l'th
        and l+1'th links.
     """
-    def single(self, l):
+    def sGet(self, l):
         if l<0 or l >= self.n :
             raise IndexError("Index " + str(l) + " out of bound " + str(self.n))
         return self.single[l]
 
-    def double(self, l):
-        if l<0 or l >= self.n :
+    def dGet(self, l):
+        #Note > rather than >=.
+        if l<0 or l > self.n :
             raise IndexError("Index " + str(l) + " out of bound " + str(self.n))
         return self.double[l]
     
@@ -201,11 +223,11 @@ class SpinChainEyes(SpinChainOperators):
     """
     def __init__(self, n, delta, B=1, J=1):
         self.n = n
-        self.single = [1]*n #the single-link operators
-        self.double = [1]*n #the double-link operators
-        for single, double in zip(self.single, self.double):
-            single = np.eye(2)
-            double = np.zeros((2, 2, 2, 2)) 
+        sElem = np.eye(2)
+        self.single = [sElem]*n
+
+        dElem = None
+        self.double = [dElem]*n
     
 class SpinChainPaulis(SpinChainOperators):
     """Represent the time-evolution operators of a quantum spin chain.
@@ -263,10 +285,16 @@ class TensorCoef:
         return thestring
 
     def setgamma(self, newgamma):
+        if newgamma.shape != self.gamma.shape:
+            raise ValueError(('Length of newgamma=%i differs from length of'
+                              'oldgamma=%i.')%newgamma.shape, self.gamma.shape)
         self.gamma = newgamma
 
     def setlambda(self, newlambda):
-        self.lam = newlam
+        if newlambda.shape != self.lam.shape:
+            raise ValueError(('Length of newlambda=%i differs from length of'
+                              'oldlambda=%i.')%newlambda.shape, self.lam.shape)
+        self.lam = newlambda
     
     def makegamma(self, ket, chi, hdim):
         gamma = np.zeros((hdim, chi, chi), dtype=np.complex)
@@ -355,10 +383,20 @@ def paulitwo_right(i):
                 # [1], [1], [2, 3, 1, 
 
 if __name__=="__main__":
-    n = 8
+    n = 30
     chi = n/2 + 2
     chain = [1, 1]
     for i in range(0, n-2):
         chain.append(0)
-    spinwave = TensorNetwork(chain, chi, 2) 
-    print spinwave
+    spinwave = SpinWaveTEBD(chain, chi, 0.1, hdim=2) 
+    evs = spinwave.evolve(1.0, 15)
+    t = evs[:, 0]
+    for i in range(1, evs.shape[1]):
+        print evs[:, i]
+        plt.plot(t, evs[:, i], label=str(i))
+    plt.xlabel("Time")
+    plt.ylabel("Spectrum")
+    plt.ylim((-0.1, 1.1))
+    plt.legend()
+    plt.show()
+    #print evs
