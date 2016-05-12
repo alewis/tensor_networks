@@ -44,20 +44,43 @@ class SpinWaveTEBD:
             self.ops = SpinChainPauli(len(chain), delta)
         else:
             raise NotImplementedError("Only identity currently supported.")
+        self.__initprint(utype, chain)
 
-    def evolve(self, T, l):
+    def __initprint(self, utype, chain):
+        chainstr = ""
+        for c in chain:
+          chainstr+=str(c)
+        print "*************************************************************"
+        print "Initializing TEBD spin wave simulation."
+        print "Bond dimension: ", self.chi
+        print "Hilbert space dimension: ", self.hdim
+        print "Time-evolution operator type: ", utype
+        print "Number of qbits: ", self.n
+        print "Initial state: |"+chainstr+">"
+        print "Timestep size: ", self.delta
+        print "Initial time: ", self.thist
+        print "*************************************************************"
+
+    def evolve(self, T, trackqbit):
+        if trackqbit > self.n-1:
+            raise ValueError("You asked to track a qbit whose index was"+
+                             " greater than the length of the chain.")
+        print "Beginning evolution..."
+        print "Initial time: ", self.thist
+        print "Final time: ", T
+        print "*************************************************************"
         output = []
         times = []
         while (self.thist + self.delta) < T:
+            outstr = "Step: " + str(self.step) + ", Time: " + str(self.thist)
+            outstr += "/" + str(T) 
+            print outstr
             self.__advance()
-            outevs = list(self.network.evs(l))
+            outevs = list(self.network.evs(trackqbit))
             output.append([self.thist,] + outevs)
             # times.append(self.thist)
             # output.append(outevs)
 
-            outstr = "Step: " + str(self.step) + ", Time: " + str(self.thist)
-            outstr += "/" + str(T) 
-            print outstr
         #tarr = np.array(times)
         outarr = np.array(output)
         print "Evolution finished!"
@@ -67,9 +90,11 @@ class SpinWaveTEBD:
         """Advance the simulation one timestep. 
         """
         for l in range(0, self.n):
+            print "qbit", l, ":"
             sOp = self.ops.sGet(l)
             dOp = self.ops.dGet(l)
             self.network.transform(l, sOp, dOp)
+            print "\tApplied the operators successfully."
         self.thist += self.delta
         self.step += 1
 
@@ -139,31 +164,76 @@ class TensorNetwork:
 
 
     def __single_transform(self, l, U):
-        coef = self.coefs[l]
-        atup = (U, coef.gamma)
+        atup = (U, self.coefs[l].gamma)
         U_idx = [-1, 1]
-        if (0==l):
+        if (len(self.coefs[l].gamma.shape)==2):
             G_idx = [1, -2]
         else:
             G_idx = [1, -2, -3]
         idx = (U_idx, G_idx)
         newgamma = scon(atup, idx)
         self.coefs[l].setgamma(newgamma) 
+        print "\t\tUpdated gamma^"+str(l)+"."
 
-    def __double_transform(self, l, V):
-        #compute density matrix
-        theta = self.__theta_ij(V, self.coefs[l], self.coefs[l+1])
+    def __newgammaD(self, theta, l):
+        """ Apply Eqns. 22-24 in Vidal 2003 to update gamma^D 
+            (gamma of the next qbit).
+        """
         rhoDK = self.__rhoDK(theta, self.coefs[l-1].lam)    
         #diagonalize
         idx = self.chi * self.hdim
         rhoDKflat = rhoDK.reshape([idx, idx]) 
-        evals, evecs = la.eig(rhoDKflat)
-        print len(evals)
-        raise ValueError()
+        evals, evecs = la.eigh(rhoDKflat) #note rho is a density matrix and thus
+                                          #hermitian
+        print "\t\trho_DK had", len(evals),"eigenvalues; truncating to", self.chi 
+        evals = evals[:self.chi]
+        evecs = evecs[:,:self.chi]
+        return evecs
+
+    def __newlambdagammaC(self, theta, l):
+        """ Apply Eqns. 25-27 in Vidal 2003 to update lambda^C and gamma^C
+            (lambda and gamma of this qbit).
+        """
+        gamma_ket = self.coefs[l+1].lam
+        gamma_bra = np.conjugate(gamma_ket)
+        Gamma_star = np.conjugate(self.coefs[l+1].gamma)
+        inputs = [Gamma_star, theta, gamma_bra, gamma_ket]
+        Gamma_star_idx = [1, -3, -2]
+        theta_idx = [-1, 1, -4, -5]
+        gamma_bra_idx = [-6]
+        gamma_ket_idx = [-7]
+        idx = [Gamma_star_idx, theta_idx, gamma_bra_idx, gamma_ket_idx]
+        contract_me = scon(inputs, idx)
+        svd_me = np.einsum('agibggg', contract_me)
+        evals, evecs = la.eigh(svd_me)
+        return evals, evecs
+        
+    def __double_transform(self, l, V):
+        """ Appply the operations from Eqn. 22-27 in Vidal 2003 in order to 
+            update gamma^C, lambda^C, and gamma^D, where C refers to the present
+            qbit and D to the one to its immediate right.
+        """
+        #Compute theta and update gamma^D.
+        theta = self.__theta_ij(V, self.coefs[l], self.coefs[l+1])
+        newgammaD = self.__newgammaD(theta, l)
+        newgammaD.shape = self.coefs[l+1].gamma.shape
+        self.coefs[l+1].setgamma(newgammaD)
+        print "\t\tUpdated gamma^"+str(l+1)+"."
+
+        #Updata lambda^C, gamma^C.
+        newlambdaC, newgammaC = self.__newlambdagammaC(theta, l)
+        self.coefs[l].setlambda(newlambdaC[0, :])
+        print "\t\tUpdated lambda^"+str(l)+"."
+        newgammaC.shape = self.coefs[l].gamma.shape
+        self.coefs[l].setgamma(newgammaC)
+        print "\t\tUpdated gamma^"+str(l)+"."
+
+
 
     def __theta_ij(self, V, coef_l, coef_r):
         """ Compute theta^ij_ac 
           =sum(b) sum(k,l){ V^ij_kl G^Ck_ab L_b G^Dl_bc}
+          (Eq. 22 of Vidal 2003)
         """
         Gc = coef_l.gamma
         lam = coef_l.lam
@@ -180,6 +250,8 @@ class TensorNetwork:
         return out_two
     
     def __rhoDK(self, theta, lam):
+        """ Does the diagonalization in Eq.23 of Vidal 2003.
+        """
         theta_star = np.conjugate(theta) 
         lam_bra = np.conjugate(lam)
         inputs = (lam_bra, lam, theta, theta_star)
@@ -202,7 +274,9 @@ class TensorNetwork:
         if not 0 <= l <= self.n-1:
             raise IndexError("l out of bounds.")
         if 0 < l < self.n-2 and double is not None:
+            print "\tApplying the double-qbit operator:"
             self.__double_transform(l, double) 
+        print "\tApplying the single-qbit operator:"
         self.__single_transform(l, single)
     
 
@@ -237,7 +311,7 @@ class SpinChainEyes(SpinChainOperators):
         dElem = np.zeros((2, 2, 2, 2))
         self.double = [dElem]*n
     
-class SpinChainPaulis(SpinChainOperators):
+class SpinChainPauli(SpinChainOperators):
     """Represent the time-evolution operators of a quantum spin chain.
     """
     def __init__(self, n, delta, B=1, J=1):
@@ -273,6 +347,9 @@ class TensorCoef:
        l in a tensor network. This class represents coefficients in the
        middle of the chain: Gamma^i_a1,a2 Lambda_a1, i->{0, hdim-1},
        a->{0, chi-1}.
+       The shapes are: gamma^i_jk -> (i, j, k) -> (hdim, chi, chi)
+                       lambda^i -> (i) -> chi
+                       gamma^i_j -> (i, j) -> (hdim, chi)
     """
     def __init__(self, ket, chi, hdim):
         self.hdim = hdim
@@ -294,15 +371,15 @@ class TensorCoef:
 
     def setgamma(self, newgamma):
         if newgamma.shape != self.gamma.shape:
-            raise ValueError(('Length of newgamma=%i differs from length of'
+            raise ValueError(('Shape of newgamma=%i differs from shape of'
                               'oldgamma=%i.')%newgamma.shape, self.gamma.shape)
-        self.gamma = newgamma
+        self.gamma = np.copy(newgamma)
 
     def setlambda(self, newlambda):
         if newlambda.shape != self.lam.shape:
-            raise ValueError(('Length of newlambda=%i differs from length of'
+            raise ValueError(('Shape of newlambda=%i differs from shape of'
                               'oldlambda=%i.')%newlambda.shape, self.lam.shape)
-        self.lam = newlambda
+        self.lam = np.copy(newlambda)
     
     def makegamma(self, ket, chi, hdim):
         gamma = np.zeros((hdim, chi, chi), dtype=np.complex)
@@ -396,14 +473,14 @@ if __name__=="__main__":
     chain = [1, 1]
     for i in range(0, n-2):
         chain.append(0)
-    spinwave = SpinWaveTEBD(chain, chi, 0.1, hdim=2) 
-    evs = spinwave.evolve(1.0, 15)
+    spinwave = SpinWaveTEBD(chain, chi, 0.1, hdim=2, utype="pauli") 
+    evs = spinwave.evolve(1.0, 7)
     t = evs[:, 0]
     for i in range(1, evs.shape[1]):
         plt.plot(t, evs[:, i], label=str(i))
     plt.xlabel("Time")
     plt.ylabel("Spectrum")
-    plt.ylim((-0.1, 1.1))
-    plt.legend()
+    #plt.ylim((-0.1, 1.1))
+    plt.legend(loc="best")
     plt.show()
     #print evs
