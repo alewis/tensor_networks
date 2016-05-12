@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from numpy import linalg as la
 from scon import scon
 
 ###############################################################################
@@ -65,18 +66,13 @@ class SpinWaveTEBD:
     def __advance(self):
         """Advance the simulation one timestep. 
         """
-        ridx = self.n-1
-        for l in range(0, ridx):
+        for l in range(0, self.n):
             sOp = self.ops.sGet(l)
             dOp = self.ops.dGet(l)
             self.network.transform(l, sOp, dOp)
-        sOp = self.ops.sGet(ridx)
-        self.network.transform(l, sOp)
-        
         self.thist += self.delta
         self.step += 1
 
-    
     def printnetwork(self):
         return str(self.network)
 ###############################################################################
@@ -141,28 +137,6 @@ class TensorNetwork:
         thestring += "\n*******DONE PRINTING*******\n"
         return thestring
 
-    def __theta_ij(self, V, coef_l, coef_r):
-        """ Compute theta^ij_ac 
-          =sum(b) sum(k,l){ V^ij_kl G^Ck_ab L_b G^Dl_bc}
-        """
-        atup = (V, coef_l.gamma, coef_l.lam, coef_r.gamma)
-        V_idx = [-1, -2, 3, 4]
-        Gc_idx = [2, -3, 3]
-        L_idx = [3]
-        Gd_idx = [1, 3, -4]
-        idx = (V_idx, Gc_idx, L_idx, Gd_idx)
-        return scon(atup, idx)
-    
-    def __rho_evs(self, theta, lam):
-        theta_star = np.conjugate(theta) 
-        lam_bra = np.conjugate(lam)
-        inputs = (lam_bra, lam, theta, theta_star)
-        lam_bra_idx = [1]
-        lam_idx = [1]
-        theta_idx = [2, -1, 1, -2]
-        theta_star_idx = [2, -3, 1, -4]
-        idx = (lam_bra_idx, lam_idx, theta_idx, theta_star_idx)
-        return scon(inputs, idx)
 
     def __single_transform(self, l, U):
         coef = self.coefs[l]
@@ -177,8 +151,46 @@ class TensorNetwork:
         self.coefs[l].setgamma(newgamma) 
 
     def __double_transform(self, l, V):
+        #compute density matrix
         theta = self.__theta_ij(V, self.coefs[l], self.coefs[l+1])
-        Jevs = self.__rho_evs(theta, self.coefs[l-1].lam)    
+        rhoDK = self.__rhoDK(theta, self.coefs[l-1].lam)    
+        #diagonalize
+        idx = self.chi * self.hdim
+        rhoDKflat = rhoDK.reshape([idx, idx]) 
+        evals, evecs = la.eig(rhoDKflat)
+        print len(evals)
+        raise ValueError()
+
+    def __theta_ij(self, V, coef_l, coef_r):
+        """ Compute theta^ij_ac 
+          =sum(b) sum(k,l){ V^ij_kl G^Ck_ab L_b G^Dl_bc}
+        """
+        Gc = coef_l.gamma
+        lam = coef_l.lam
+        Gd = coef_r.gamma
+        atup = (V, Gc, lam, Gd)
+
+        V_idx = [-1, -2, 1, 2]
+        Gc_idx = [1, -3, -5]
+        L_idx = [-6]
+        Gd_idx = [2, -7, -4]
+        idx = (V_idx, Gc_idx, L_idx, Gd_idx)
+        out_one = scon(atup, idx)
+        out_two = np.einsum('ijklmmm', out_one)
+        return out_two
+    
+    def __rhoDK(self, theta, lam):
+        theta_star = np.conjugate(theta) 
+        lam_bra = np.conjugate(lam)
+        inputs = (lam_bra, lam, theta, theta_star)
+        lam_bra_idx = [-5]
+        lam_idx = [-6]
+        theta_idx = [2, -1, -7, -2]
+        theta_star_idx = [2, -3, -8, -4]
+        idx = (lam_bra_idx, lam_idx, theta_idx, theta_star_idx)
+        bracket_one = scon(inputs, idx)
+        rho = np.einsum('abcdeeee', bracket_one)
+        return rho
 
     def transform(self, l, single, double=None):
         """Apply an operator to the l'th and, optionally,
@@ -187,15 +199,11 @@ class TensorNetwork:
            the argument 'double'. If the latter is left 'None' only the 
            'single' transform is performed.
         """
-        if not 0 <= l < self.n:
+        if not 0 <= l <= self.n-1:
             raise IndexError("l out of bounds.")
-
-        if l == (self.n-1):
-            self.__single_transform(l, single)
-        else:
-            if double is not None:
-                self.__double_transform(l, double) 
-            self.__single_transform(l, single)
+        if 0 < l < self.n-2 and double is not None:
+            self.__double_transform(l, double) 
+        self.__single_transform(l, single)
     
 
 ###############################################################################
@@ -226,7 +234,7 @@ class SpinChainEyes(SpinChainOperators):
         sElem = np.eye(2)
         self.single = [sElem]*n
 
-        dElem = None
+        dElem = np.zeros((2, 2, 2, 2))
         self.double = [dElem]*n
     
 class SpinChainPaulis(SpinChainOperators):
@@ -383,7 +391,7 @@ def paulitwo_right(i):
                 # [1], [1], [2, 3, 1, 
 
 if __name__=="__main__":
-    n = 30
+    n = 10
     chi = n/2 + 2
     chain = [1, 1]
     for i in range(0, n-2):
@@ -392,7 +400,6 @@ if __name__=="__main__":
     evs = spinwave.evolve(1.0, 15)
     t = evs[:, 0]
     for i in range(1, evs.shape[1]):
-        print evs[:, i]
         plt.plot(t, evs[:, i], label=str(i))
     plt.xlabel("Time")
     plt.ylabel("Spectrum")
