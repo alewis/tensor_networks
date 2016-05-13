@@ -26,7 +26,8 @@ class SpinWaveTEBD:
        link l whose eigenvalues are to be returned.
 
        Method 'printnetwork' outputs detailed information about the current
-       state of the spin chain.
+       state of the spin chain. 'printnetwork(l)' outputs the tensors
+       for the l'th qbit only.
     """
     def __init__(self, chain, chi, delta, utype="identity", hdim=2):
         if hdim != 2:
@@ -38,10 +39,10 @@ class SpinWaveTEBD:
         self.delta = delta
         self.hdim = hdim
         self.network = TensorNetwork(chain, chi, hdim=hdim)
-        if utype == "identity":
-            self.ops = SpinChainEyes(len(chain), delta)
-        elif utype == "pauli":
-            self.ops = SpinChainPauli(len(chain), delta)
+        if utype == "pauli":
+            self.ops = PauliSpinChainOperators(delta, 1, 1)
+        # if utype == "identity":
+            # self.ops = SpinChainEyes(len(chain), delta)
         else:
             raise NotImplementedError("Only identity currently supported.")
         self.__initprint(utype, chain)
@@ -61,7 +62,7 @@ class SpinWaveTEBD:
         print "Initial time: ", self.thist
         print "*************************************************************"
 
-    def evolve(self, T, trackqbit):
+    def evolve(self, T, trackqbit, verbose=False):
         if trackqbit > self.n-1:
             raise ValueError("You asked to track a qbit whose index was"+
                              " greater than the length of the chain.")
@@ -75,7 +76,7 @@ class SpinWaveTEBD:
             outstr = "Step: " + str(self.step) + ", Time: " + str(self.thist)
             outstr += "/" + str(T) 
             print outstr
-            self.__advance()
+            self.__advance(verbose)
             outevs = list(self.network.evs(trackqbit))
             output.append([self.thist,] + outevs)
             # times.append(self.thist)
@@ -86,20 +87,25 @@ class SpinWaveTEBD:
         print "Evolution finished!"
         return outarr
 
-    def __advance(self):
-        """Advance the simulation one timestep. 
+    def __advance(self, verbose):
+        """Advance the on one timestep. 
         """
         for l in range(0, self.n):
-            print "qbit", l, ":"
-            sOp = self.ops.sGet(l)
-            dOp = self.ops.dGet(l)
-            self.network.transform(l, sOp, dOp)
-            print "\tApplied the operators successfully."
+            if verbose:
+                print "qbit", l, ":"
+            theseops = self.ops(l)
+            for op in theseops:
+                self.network.transform(l, op, verbose)
+            if verbose:
+                print "\tApplied the operators successfully."
         self.thist += self.delta
         self.step += 1
 
-    def printnetwork(self):
-        return str(self.network)
+    def printnetwork(self, l=None):
+        if l is None:
+            return str(self.network)
+        else:
+            return self.network.lthnodestring(l)
 ###############################################################################
 
 class TensorNetwork:
@@ -162,8 +168,10 @@ class TensorNetwork:
         thestring += "\n*******DONE PRINTING*******\n"
         return thestring
 
+    def lthnodestring(self, l):
+        return str(self.coefs[l])
 
-    def __single_transform(self, l, U):
+    def __single_transform(self, l, U, verbose=False):
         atup = (U, self.coefs[l].gamma)
         U_idx = [-1, 1]
         if (len(self.coefs[l].gamma.shape)==2):
@@ -173,7 +181,8 @@ class TensorNetwork:
         idx = (U_idx, G_idx)
         newgamma = scon(atup, idx)
         self.coefs[l].setgamma(newgamma) 
-        print "\t\tUpdated gamma^"+str(l)+"."
+        if verbose:
+            print "\t\tUpdated gamma^"+str(l)+"."
 
     def __newgammaD(self, theta, l):
         """ Apply Eqns. 22-24 in Vidal 2003 to update gamma^D 
@@ -185,7 +194,6 @@ class TensorNetwork:
         rhoDKflat = rhoDK.reshape([idx, idx]) 
         evals, evecs = la.eigh(rhoDKflat) #note rho is a density matrix and thus
                                           #hermitian
-        print "\t\trho_DK had", len(evals),"eigenvalues; truncating to", self.chi 
         evals = evals[:self.chi]
         evecs = evecs[:,:self.chi]
         return evecs
@@ -208,7 +216,7 @@ class TensorNetwork:
         evals, evecs = la.eigh(svd_me)
         return evals, evecs
         
-    def __double_transform(self, l, V):
+    def __double_transform(self, l, V, verbose=False):
         """ Appply the operations from Eqn. 22-27 in Vidal 2003 in order to 
             update gamma^C, lambda^C, and gamma^D, where C refers to the present
             qbit and D to the one to its immediate right.
@@ -218,15 +226,18 @@ class TensorNetwork:
         newgammaD = self.__newgammaD(theta, l)
         newgammaD.shape = self.coefs[l+1].gamma.shape
         self.coefs[l+1].setgamma(newgammaD)
-        print "\t\tUpdated gamma^"+str(l+1)+"."
+        if verbose:
+            print "\t\tUpdated gamma^"+str(l+1)+"."
 
         #Updata lambda^C, gamma^C.
         newlambdaC, newgammaC = self.__newlambdagammaC(theta, l)
         self.coefs[l].setlambda(newlambdaC[0, :])
-        print "\t\tUpdated lambda^"+str(l)+"."
+        if verbose:
+            print "\t\tUpdated lambda^"+str(l)+"."
         newgammaC.shape = self.coefs[l].gamma.shape
         self.coefs[l].setgamma(newgammaC)
-        print "\t\tUpdated gamma^"+str(l)+"."
+        if verbose:
+            print "\t\tUpdated gamma^"+str(l)+"."
 
 
 
@@ -239,7 +250,6 @@ class TensorNetwork:
         lam = coef_l.lam
         Gd = coef_r.gamma
         atup = (V, Gc, lam, Gd)
-
         V_idx = [-1, -2, 1, 2]
         Gc_idx = [1, -3, -5]
         L_idx = [-6]
@@ -264,26 +274,82 @@ class TensorNetwork:
         rho = np.einsum('abcdeeee', bracket_one)
         return rho
 
-    def transform(self, l, single, double=None):
+    def transform(self, l, operator, verbose=False):#single, double=None):
         """Apply an operator to the l'th and, optionally,
            the l+1th link. The former transform is performed with the operator
            fed in through the argument 'single'. The latter is performed with
            the argument 'double'. If the latter is left 'None' only the 
            'single' transform is performed.
         """
-        if not 0 <= l <= self.n-1:
-            raise IndexError("l out of bounds.")
-        if 0 < l < self.n-2 and double is not None:
-            print "\tApplying the double-qbit operator:"
-            self.__double_transform(l, double) 
-        print "\tApplying the single-qbit operator:"
-        self.__single_transform(l, single)
+        if operator.issingle:
+            self.__single_transform(l, operator.data, verbose)
+        else:
+            if l!=0 and l-self.n > 2:
+                self.__double_transform(l, operator.data, verbose)
     
 
 ###############################################################################
 #SpinChainOperators - operators representing the time-evolution of the spin
 #chain.
 ###############################################################################
+
+class Operator:    
+    def __init__(self, data, issingle=True):
+        self.issingle=issingle
+        self.data = data
+
+class PauliSpinChainOperators:
+    def __init__(self, delta, B, J):
+        self.pauli00 = paulidouble(0, 0)
+        self.pauli11 = paulidouble(1, 1)
+        self.pauli22 = paulidouble(2, 2)
+        self.pauli33 = paulidouble(3, 3)
+        self.even = self.__evenops(delta, B, J)
+        self.odd = self.__oddops(delta, B, J)
+        self.evensingle = self.__evensingle(delta, B)
+        self.oddsingle = self.__oddsingle(delta, B)
+
+    def __oddops(self, delta, B, J):
+        leftop = self.__oddsingle(delta, B)[0]
+        cosJ = np.cos(J*delta)
+        sinJ = 1.j*np.sin(J*delta)
+        right = cosJ*self.pauli11 + sinJ*self.pauli11
+        right += cosJ*self.pauli22 + sinJ*self.pauli22
+        right += cosJ*self.pauli33 + sinJ*self.pauli33
+        rightop = Operator(right, issingle=False)
+        return [leftop, rightop]
+
+    def __oddsingle(self, delta, B):
+        cosB = np.cos(B*delta)
+        sinB = 1.j*np.sin(B*delta)
+        left = cosB*pauli(0) + sinB*pauli(3)  
+        leftop = Operator(left, issingle=True)
+        return [leftop]
+
+    def __evenops(self, delta, B, J):
+        leftop = self.__evensingle(delta, B)[0]
+        cosJ = np.cos(J*delta/2.)
+        sinJ = 1.j*np.sin(J*delta/2.)
+        right = cosJ*self.pauli11 + sinJ*self.pauli11
+        right += cosJ*self.pauli22 + sinJ*self.pauli22
+        right += cosJ*self.pauli33 + sinJ*self.pauli33
+        rightop = Operator(right, issingle=False)
+        return [leftop, rightop, leftop, rightop]
+
+    def __evensingle(self, delta, B):
+        cosB = np.cos(B*delta/2.)
+        sinB = 1.j*np.sin(B*delta/2.)
+        left = cosB*pauli(0) + sinB*pauli(3)  
+        leftop = Operator(left, issingle=True)
+        return [leftop]
+
+    def __call__(self, l):
+        if l%2 == 0:
+            return self.even
+        else:
+            return self.odd
+          
+            
 class SpinChainOperators:
     """Interface class. Method 'single' returns the operator acting on the 
        l'th link. Method 'double' returns the operator acting on the l'th
@@ -309,20 +375,35 @@ class SpinChainEyes(SpinChainOperators):
         self.single = [sElem]*n
 
         dElem = np.zeros((2, 2, 2, 2))
-        self.double = [dElem]*n
+        self.double = [dElem]*(n-1)
+        self.double.append(None)
     
 class SpinChainPauli(SpinChainOperators):
     """Represent the time-evolution operators of a quantum spin chain.
     """
     def __init__(self, n, delta, B=1, J=1):
-        self.n = n
-        self.single = [1]*n 
-        self.double = [1]*n
-        psum = pauli(0) + pauli(1) + pauli(2)
-        pz = pauli(2)
+        # self.n = n
+        # deven = delta/2
+        # dodd = delta
+        # single_even = pauli(0)*np.cos(B*deven) + 1.0j*pauli(3)*np.sin(B*deven)
+        # single_odd = pauli(0)*np.cos(B*dodd) + 1.0j*pauli(3)*np.sin(B*dodd)
+        # pauli00 = paulidouble(0, 0)
+        # pauli11 = paulidouble(1, 1)
+        # pauli22 = paulidouble(2, 2)
+        # pauli33 = paulidouble(3, 3)
+
+        #for i in range(0, n-1):
+
+        # self.single = [B*pauli(3)]*n
+        # self.double = [None]*(n-1)
+
+        # self.double = [1]*n
+        # psum = pauli(0) + pauli(1) + pauli(2)
+        # pz = pauli(2)
+        # s
       
-        for single, double in zip(self.single, self.double):
-            U = np.zeros((2, 2, 2, 2))
+        # for single, double in zip(self.single, self.double):
+            # U = np.zeros((2, 2, 2, 2))
             # if 0 == l % 2: #even
               # scalar = 2.*np.cos(delta/2. * B) + 2.*np.cos(delta/2. * J)
               # left = 2.j * np.sin(delta/2. * B) * pz
@@ -334,6 +415,7 @@ class SpinChainPauli(SpinChainOperators):
               # left = 1.j * np.sin(delta * B) * pz
               # left += 1.j * np.sin(delta * J) * psum
               # right = 1.j * np.sin(delta * J) * psum
+        self.double.append(None)
 ###############################################################################
 
 
@@ -445,7 +527,7 @@ def pauli(i):
     """ Return the i'th Pauli matrix.
     """
     if (0==i):
-        return np.eye(2)
+        return np.eye(2, dtype=np.complex)
     elif (1==i):
         return np.array([[0,1], [1, 0]], dtype=np.complex)
     elif (2==i):
@@ -455,11 +537,21 @@ def pauli(i):
     else:
         raise ValueError("Invalid Pauli matrix index " + str(i))
 
-def paulitwo_left(i):
-    return np.kron(pauli(i), pauli(0)) 
+def paulidouble(i, j, tensor=True):
+    pauli_i = pauli(i)
+    pauli_j = pauli(j)
+    outer = np.zeros((4, 4), dtype=np.complex)
+    outer[:2, :2] = pauli_i
+    outer[2:, 2:] = pauli_j
+    if tensor:
+        outer.shape = (2, 2, 2, 2)
+    return outer
 
-def paulitwo_right(i):
-    return np.kron(pauli(0), pauli(i))
+# def paulitwo_left(i):
+    # return np.kron(pauli(i), pauli(0)) 
+
+# def paulitwo_right(i):
+    # return np.kron(pauli(0), pauli(i))
 
 # def newrho_DK(Lket, theta_ij):
     # Lbra = np.conjugate(L_before)
@@ -468,16 +560,16 @@ def paulitwo_right(i):
                 # [1], [1], [2, 3, 1, 
 
 if __name__=="__main__":
-    n = 10
+    n = 30
     chi = n/2 + 2
     chain = [1, 1]
     for i in range(0, n-2):
         chain.append(0)
-    spinwave = SpinWaveTEBD(chain, chi, 0.1, hdim=2, utype="pauli") 
-    evs = spinwave.evolve(1.0, 7)
+    spinwave = SpinWaveTEBD(chain, chi, 0.005, hdim=2, utype="pauli") 
+    evs = spinwave.evolve(25, 15, verbose=False)
     t = evs[:, 0]
     for i in range(1, evs.shape[1]):
-        plt.plot(t, evs[:, i], label=str(i))
+        plt.semilogy(t, evs[:, i], label=str(i))
     plt.xlabel("Time")
     plt.ylabel("Spectrum")
     #plt.ylim((-0.1, 1.1))
